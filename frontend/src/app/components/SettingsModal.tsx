@@ -48,8 +48,8 @@ export default function SettingsModal({ isOpen, onClose, currentIp, onSave }: Se
               <code>ws://{ip || "IP_RASPI"}:8765</code>
             </div>
             <div>
-              <strong>Stream Video (MediaMTX):</strong>
-              <code>http://{ip || "IP_RASPI"}:8889/panzerbot</code>
+              <strong>Stream Video (FFmpeg):</strong>
+              <code>http://{ip || "IP_RASPI"}:8888</code>
             </div>
           </div>
 

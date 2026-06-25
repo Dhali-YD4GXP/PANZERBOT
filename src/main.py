@@ -4,6 +4,7 @@ from src.adapters.drivers.gpio_motor import GPIOMotorDriver
 from src.adapters.drivers.gpio_servo import GPIOServoDriver
 from src.adapters.drivers.speaker_driver import SpeakerDriver
 from src.adapters.drivers.network_receiver import NetworkReceiver
+from src.adapters.drivers.ffmpeg_streamer import FFmpegStreamer
 
 from src.usecases.drive_tank import DriveTankUseCase
 from src.usecases.aim_camera import AimCameraUseCase
@@ -21,6 +22,7 @@ def main():
     servo_driver = GPIOServoDriver()
     speaker_driver = SpeakerDriver()
     network_receiver = NetworkReceiver(host="0.0.0.0", port=8765)
+    video_streamer = FFmpegStreamer(device="/dev/video0", port=8888)
 
     # 2. Inisialisasi Use Cases (Logika Aplikasi)
     drive_tank_usecase = DriveTankUseCase(motor_driver)
@@ -42,6 +44,9 @@ def main():
         on_soundboard=controller.handle_soundboard
     )
 
+    print("[Main] Memulai direct video streamer...")
+    video_streamer.start_streaming()
+
     # Kembalikan kamera ke posisi tengah saat startup
     aim_camera_usecase.center_camera()
 
@@ -57,6 +62,7 @@ def main():
     finally:
         # 5. Cleanup Resources
         network_receiver.stop_listening()
+        video_streamer.stop_streaming()
         drive_tank_usecase.stop()
         play_soundboard_usecase.stop()
         
