@@ -50,10 +50,15 @@ class SpeakerDriver(SpeakerPort):
 
         try:
             # Jalankan command player secara asinkron agar tidak memblokir thread kontrol utama
-            # Output dialihkan ke /dev/null agar tidak mengotori console log utama
+            # Arahkan output suara secara spesifik ke USB Soundcard (Card 1)
+            if player_cmd == "mpg123":
+                cmd = ["mpg123", "-a", "hw:1", file_path]
+            else: # aplay
+                cmd = ["aplay", "-D", "plughw:1,0", file_path]
+
             devnull = open(os.devnull, 'wb')
             process = subprocess.Popen(
-                [player_cmd, file_path],
+                cmd,
                 stdout=devnull,
                 stderr=devnull
             )
