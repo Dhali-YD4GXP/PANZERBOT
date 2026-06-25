@@ -46,6 +46,7 @@ class FFmpegStreamer(VideoStreamerPort):
 
     def _stream_loop(self) -> None:
         """Loop utama untuk menjalankan ffmpeg. Mengulang ketika klien terputus."""
+        log_file_path = "ffmpeg.log"
         while self.is_running:
             # Command FFmpeg:
             # -f v4l2: input format video4linux2
@@ -71,15 +72,21 @@ class FFmpegStreamer(VideoStreamerPort):
             ]
             
             try:
-                # Buka devnull agar log ffmpeg yang sangat berisik tidak membanjiri terminal
-                devnull = open(os.devnull, 'wb')
-                self.process = subprocess.Popen(
-                    cmd,
-                    stdout=devnull,
-                    stderr=devnull
-                )
+                start_time = time.time()
+                # Tulis output & error ffmpeg ke file log untuk debugging
+                with open(log_file_path, "w") as log_file:
+                    self.process = subprocess.Popen(
+                        cmd,
+                        stdout=log_file,
+                        stderr=log_file
+                    )
                 # Tunggu hingga klien disconnect dan ffmpeg selesai
                 self.process.wait()
+                
+                # Jika ffmpeg mati kurang dari 2 detik, kemungkinan besar gagal start
+                elapsed = time.time() - start_time
+                if elapsed < 2.0 and self.is_running:
+                    print(f"[FFmpegStreamer] Peringatan: FFmpeg keluar terlalu cepat ({elapsed:.2f}s). Cek '{log_file_path}' di Raspberry Pi.")
             except Exception as e:
                 if self.is_running:
                     print(f"[FFmpegStreamer] Error saat menjalankan ffmpeg: {e}")
@@ -94,7 +101,7 @@ class FFmpegStreamer(VideoStreamerPort):
                     self.process = None
 
             # Jeda kecil sebelum restart agar tidak spamming jika ada error persisten (misal kamera dicabut)
-            time.sleep(0.5)
+            time.sleep(1.0)
 
     def stop_streaming(self) -> None:
         """Menghentikan stream video."""
