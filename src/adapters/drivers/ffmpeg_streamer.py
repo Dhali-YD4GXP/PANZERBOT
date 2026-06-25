@@ -2,12 +2,105 @@ import subprocess
 import time
 import threading
 import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 from src.usecases.ports.video_streamer_port import VideoStreamerPort
 
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """Server HTTP yang mendukung multi-threading untuk melayani banyak klien secara paralel."""
+    allow_reuse_address = True
+
+class MJPEGHandler(BaseHTTPRequestHandler):
+    """Request Handler untuk menyajikan stream MJPEG."""
+    
+    # Nonaktifkan logging HTTP bawaan agar tidak membanjiri terminal konsol
+    def log_message(self, format, *args):
+        pass
+
+    def do_GET(self):
+        if self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+            self.send_header('Cache-Control', 'no-cache, private')
+            self.send_header('Pragma', 'no-cache')
+            self.end_headers()
+            
+            try:
+                # Loop mengirimkan frame JPEG terbaru ke klien secara terus-menerus
+                while True:
+                    streamer = self.server.streamer
+                    if streamer and streamer.reader:
+                        # Tunggu hingga frame baru tersedia
+                        streamer.reader.frame_event.wait(timeout=1.0)
+                        frame = streamer.reader.latest_frame
+                        if frame:
+                            self.wfile.write(b'--frame\r\n')
+                            self.wfile.write(b'Content-Type: image/jpeg\r\n')
+                            self.wfile.write(f'Content-Length: {len(frame)}\r\n\r\n'.encode())
+                            self.wfile.write(frame)
+                            self.wfile.write(b'\r\n')
+                    else:
+                        time.sleep(0.1)
+            except (ConnectionResetError, BrokenPipeError):
+                # Klien terputus secara normal
+                pass
+            except Exception as e:
+                print(f"[MJPEGHandler] Error koneksi client: {e}")
+        else:
+            self.send_error(404)
+
+class FrameReader(threading.Thread):
+    """Thread khusus untuk membaca stream JPEG mentah dari stdout FFmpeg secara non-blocking."""
+    
+    def __init__(self, process):
+        super().__init__(daemon=True)
+        self.process = process
+        self.latest_frame = None
+        self.frame_event = threading.Event()
+        self.is_running = True
+
+    def run(self):
+        stream = self.process.stdout
+        buffer = bytearray()
+        
+        while self.is_running:
+            # Baca data dalam chunk 4096 byte
+            chunk = stream.read(4096)
+            if not chunk:
+                break
+            buffer.extend(chunk)
+            
+            # Cari batas-batas gambar JPEG di dalam buffer
+            while True:
+                # SOI (Start of Image): 0xff 0xd8
+                start = buffer.find(b'\xff\xd8')
+                if start == -1:
+                    # Buang data lama jika tidak ada penanda awal JPEG
+                    if len(buffer) > 4096:
+                        buffer = buffer[-4096:]
+                    break
+                
+                # EOI (End of Image): 0xff 0xd9
+                end = buffer.find(b'\xff\xd9', start)
+                if end == -1:
+                    # Data belum lengkap, keluar untuk membaca chunk berikutnya
+                    break
+                
+                # Ekstrak data frame JPEG lengkap
+                frame = buffer[start:end+2]
+                self.latest_frame = frame
+                
+                # Beritahu semua client bahwa ada frame baru
+                self.frame_event.set()
+                self.frame_event.clear()
+                
+                # Hapus data frame yang sudah di-ekstrak dari buffer
+                buffer = buffer[end+2:]
+
 class FFmpegStreamer(VideoStreamerPort):
-    """Implementasi VideoStreamerPort menggunakan FFmpeg.
-    Mengirimkan stream MJPEG secara langsung ke port HTTP.
-    Menggunakan mode '-listen 1' yang akan disajikan secara loop pada thread terpisah.
+    """Implementasi VideoStreamerPort menggunakan FFmpeg dan Python HTTP Server.
+    FFmpeg berjalan secara kontinu mengeluarkan JPEG ke stdout, lalu server Python
+    mendistribusikannya ke banyak klien secara stabil tanpa memicu error restart kamera.
     """
 
     def __init__(self, device: str = "/dev/video0", port: int = 8888, resolution: str = "640x480", framerate: int = 30):
@@ -15,24 +108,64 @@ class FFmpegStreamer(VideoStreamerPort):
         self.port = port
         self.resolution = resolution
         self.framerate = str(framerate)
+        
         self.process = None
+        self.reader = None
+        self.http_server = None
+        self.server_thread = None
         self.is_running = False
-        self.thread = None
 
     def start_streaming(self) -> None:
-        """Memulai stream video pada thread latar belakang."""
+        """Memulai streaming video dan server HTTP."""
         if self.is_running:
             print("[FFmpegStreamer] Streamer sudah berjalan.")
             return
 
         self.is_running = True
         
-        # Bersihkan terlebih dahulu proses mediamtx dan ffmpeg lama agar device kamera bebas
+        # Bersihkan proses bertabrakan lama
         self._cleanup_conflicting_processes()
 
-        self.thread = threading.Thread(target=self._stream_loop, daemon=True)
-        self.thread.start()
-        print(f"[FFmpegStreamer] Server MJPEG langsung berjalan di http://0.0.0.0:{self.port} (kamera: {self.device})")
+        # Jalankan FFmpeg untuk menulis stream JPEG mentah ke stdout
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f", "v4l2",
+            "-input_format", "mjpeg",
+            "-video_size", self.resolution,
+            "-framerate", self.framerate,
+            "-i", self.device,
+            "-c:v", "copy",
+            "-f", "mjpeg",
+            "-"
+        ]
+        
+        try:
+            self.process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL
+            )
+            print("[FFmpegStreamer] Subproses FFmpeg berhasil dimulai.")
+        except Exception as e:
+            print(f"[FFmpegStreamer] Gagal menjalankan FFmpeg: {e}")
+            self.is_running = False
+            return
+
+        # Jalankan thread pembaca frame
+        self.reader = FrameReader(self.process)
+        self.reader.start()
+
+        # Jalankan Python Threaded HTTP Server
+        try:
+            self.http_server = ThreadedHTTPServer(('0.0.0.0', self.port), MJPEGHandler)
+            self.http_server.streamer = self
+            self.server_thread = threading.Thread(target=self.http_server.serve_forever, daemon=True)
+            self.server_thread.start()
+            print(f"[FFmpegStreamer] Server MJPEG stabil aktif di http://0.0.0.0:{self.port} (Kamera: {self.device})")
+        except Exception as e:
+            print(f"[FFmpegStreamer] Gagal memulai HTTP Server pada port {self.port}: {e}")
+            self.stop_streaming()
 
     def _cleanup_conflicting_processes(self) -> None:
         """Menghentikan proses mediamtx dan ffmpeg yang sedang berjalan untuk membebaskan /dev/video0."""
@@ -40,73 +173,29 @@ class FFmpegStreamer(VideoStreamerPort):
         try:
             subprocess.run(["pkill", "-f", "mediamtx"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["pkill", "-f", "ffmpeg"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(1) # Beri jeda sistem untuk menutup file descriptor kamera
+            time.sleep(1)
         except Exception as e:
             print(f"[FFmpegStreamer] Peringatan saat pkill: {e}")
 
-    def _stream_loop(self) -> None:
-        """Loop utama untuk menjalankan ffmpeg. Mengulang ketika klien terputus."""
-        log_file_path = "ffmpeg.log"
-        while self.is_running:
-            # Command FFmpeg:
-            # -f v4l2: input format video4linux2
-            # -input_format mjpeg: menggunakan decoder hardware mjpeg bawaan webcam logitech agar hemat CPU
-            # -video_size: resolusi video
-            # -framerate: fps video
-            # -i: input device
-            # -c:v copy: copy stream video tanpa encoding ulang (hemat CPU!)
-            # -f mpjpeg: output format multipart jpeg (mjpeg stream)
-            # -listen 1: bertindak sebagai server HTTP yang melayani 1 koneksi lalu keluar
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-f", "v4l2",
-                "-input_format", "mjpeg",
-                "-video_size", self.resolution,
-                "-framerate", self.framerate,
-                "-i", self.device,
-                "-c:v", "copy",
-                "-f", "mpjpeg",
-                "-content_type", "multipart/x-mixed-replace;boundary=ffmpeg",
-                "-listen", "1",
-                f"http://0.0.0.0:{self.port}"
-            ]
-            
-            try:
-                start_time = time.time()
-                # Tulis output & error ffmpeg ke file log untuk debugging
-                with open(log_file_path, "w") as log_file:
-                    self.process = subprocess.Popen(
-                        cmd,
-                        stdout=log_file,
-                        stderr=log_file
-                    )
-                # Tunggu hingga klien disconnect dan ffmpeg selesai
-                self.process.wait()
-                
-                # Jika ffmpeg mati kurang dari 2 detik, kemungkinan besar gagal start
-                elapsed = time.time() - start_time
-                if elapsed < 2.0 and self.is_running:
-                    print(f"[FFmpegStreamer] Peringatan: FFmpeg keluar terlalu cepat ({elapsed:.2f}s). Cek '{log_file_path}' di Raspberry Pi.")
-            except Exception as e:
-                if self.is_running:
-                    print(f"[FFmpegStreamer] Error saat menjalankan ffmpeg: {e}")
-                time.sleep(2)
-            finally:
-                # Pastikan proses ditutup jika error
-                if self.process:
-                    try:
-                        self.process.kill()
-                    except:
-                        pass
-                    self.process = None
-
-            # Jeda kecil sebelum restart agar tidak spamming jika ada error persisten (misal kamera dicabut)
-            time.sleep(1.0)
-
     def stop_streaming(self) -> None:
-        """Menghentikan stream video."""
+        """Menghentikan HTTP Server, thread pembaca, dan subproses FFmpeg."""
         self.is_running = False
+        
+        # 1. Hentikan HTTP Server
+        if self.http_server:
+            try:
+                self.http_server.shutdown()
+                self.http_server.server_close()
+            except Exception:
+                pass
+            self.http_server = None
+            
+        # 2. Hentikan Thread Reader
+        if self.reader:
+            self.reader.is_running = False
+            self.reader = None
+            
+        # 3. Hentikan proses FFmpeg
         if self.process:
             try:
                 self.process.terminate()
@@ -119,4 +208,5 @@ class FFmpegStreamer(VideoStreamerPort):
             except Exception:
                 pass
             self.process = None
-        print("[FFmpegStreamer] Stream video dihentikan.")
+            
+        print("[FFmpegStreamer] Stream video dihentikan sepenuhnya.")
