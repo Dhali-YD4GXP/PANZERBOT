@@ -84,7 +84,10 @@ class NetworkReceiver(CommandPort):
                     event = payload.get("event")
                     data = payload.get("data")
 
-                    if event == "tank_joystick":
+                    if event == "ping":
+                        await websocket.send(json.dumps({"event": "pong", "data": ""}))
+
+                    elif event == "tank_joystick":
                         x = float(data.get("x", 0.0))
                         y = float(data.get("y", 0.0))
                         if self.on_tank_joystick:
