@@ -7,7 +7,14 @@ class SpeakerDriver(SpeakerPort):
     Menggunakan subproses eksternal (seperti aplay atau mpg123) untuk memutar berkas audio.
     """
 
-    def __init__(self, sounds_dir: str = "/home/rozan/panzerbot/sounds"):
+    def __init__(self, sounds_dir: str = None):
+        if sounds_dir is None:
+            # Ambil path relatif dari root proyek untuk folder 'sounds'
+            current_file_dir = os.path.dirname(os.path.abspath(__file__))
+            # current_file_dir adalah src/adapters/drivers
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file_dir)))
+            sounds_dir = os.path.join(project_root, "sounds")
+
         self.sounds_dir = sounds_dir
         self.active_processes = []
 
