@@ -73,7 +73,8 @@ class NetworkReceiver(CommandPort):
 
     async def _handle_connection(self, websocket, path) -> None:
         """Menangani pesan masuk dari klien WebSocket (aplikasi android)."""
-        # print(f"[NetworkReceiver] Klien terhubung dari: {websocket.remote_address}")
+        client_address = websocket.remote_address
+        print(f"[NetworkReceiver] Klien terhubung dari: {client_address}")
         try:
             async for message in websocket:
                 if not self._is_running:
@@ -107,12 +108,12 @@ class NetworkReceiver(CommandPort):
                 except (json.JSONDecodeError, TypeError, KeyError) as e:
                     # Abaikan payload yang tidak valid agar server tidak crash
                     pass
-        except websockets.exceptions.ConnectionClosed:
-            pass
+        except websockets.exceptions.ConnectionClosed as e:
+            print(f"[NetworkReceiver] Klien terputus (ConnectionClosed): {client_address} - Code: {e.code}, Reason: {e.reason}")
         except Exception as e:
-            print(f"[NetworkReceiver] Error pada koneksi WebSocket: {e}")
-        # finally:
-        #     print(f"[NetworkReceiver] Klien terputus: {websocket.remote_address}")
+            print(f"[NetworkReceiver] Error pada koneksi WebSocket dari {client_address}: {e}")
+        finally:
+            print(f"[NetworkReceiver] Koneksi ditutup sepenuhnya: {client_address}")
 
     def _run_simulation_input(self) -> None:
         """Menjalankan input simulasi lewat terminal jika 'websockets' tidak ada."""
