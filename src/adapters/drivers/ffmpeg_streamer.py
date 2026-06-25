@@ -67,6 +67,7 @@ class FFmpegStreamer(VideoStreamerPort):
                 "-i", self.device,
                 "-c:v", "copy",
                 "-f", "mpjpeg",
+                "-content_type", "multipart/x-mixed-replace;boundary=ffmpeg",
                 "-listen", "1",
                 f"http://0.0.0.0:{self.port}"
             ]
